@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>URL Shortener — System Design</title>
+  <link rel="stylesheet" href="assets/design-doc.css">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'loose',
+      flowchart: { useMaxWidth: true, htmlLabels: true },
+    });
+  </script>
+</head>
+<body>
+  <div class="layout">
+    <nav class="toc">
+      <h2>Contents</h2>
+      <a href="#url-shortener-system-design" style="padding-left: 0px">URL Shortener — System Design</a><a href="#diagram-index" style="padding-left: 24px">Diagram index</a><a href="#1-problem-statement" style="padding-left: 12px">1. Problem statement</a><a href="#non-functional-requirements-nfrs" style="padding-left: 24px">Non-functional requirements (NFRs)</a><a href="#2-high-level-architecture" style="padding-left: 12px">2. High-level architecture</a><a href="#21-system-context" style="padding-left: 24px">2.1 System context</a><a href="#22-runtime-architecture" style="padding-left: 24px">2.2 Runtime architecture</a><a href="#23-layered-architecture-spring-boot" style="padding-left: 24px">2.3 Layered architecture (Spring Boot)</a><a href="#24-component-diagram" style="padding-left: 24px">2.4 Component diagram</a><a href="#25-create-link-sequence" style="padding-left: 24px">2.5 Create-link sequence</a><a href="#26-redirect-sequence" style="padding-left: 24px">2.6 Redirect sequence</a><a href="#3-core-api-design" style="padding-left: 12px">3. Core API design</a><a href="#create-request" style="padding-left: 24px">Create request</a><a href="#why-302-instead-of-301" style="padding-left: 24px">Why 302 instead of 301?</a><a href="#4-short-code-generation" style="padding-left: 12px">4. Short code generation</a><a href="#approach-a-implemented-database-sequence-base62" style="padding-left: 24px">Approach A (implemented): Database sequence + Base62</a><a href="#approach-b-alternative-random-hash" style="padding-left: 24px">Approach B (alternative): Random / hash</a><a href="#approach-c-custom-alias" style="padding-left: 24px">Approach C: Custom alias</a><a href="#5-data-model" style="padding-left: 12px">5. Data model</a><a href="#6-caching-cache-aside" style="padding-left: 12px">6. Caching (cache-aside)</a><a href="#7-analytics-and-async-processing" style="padding-left: 12px">7. Analytics and async processing</a><a href="#8-rate-limiting" style="padding-left: 12px">8. Rate limiting</a><a href="#9-url-normalization-security" style="padding-left: 12px">9. URL normalization & security</a><a href="#10-cap-theorem-database-choice" style="padding-left: 12px">10. CAP theorem & database choice</a><a href="#11-scaling-sketch" style="padding-left: 12px">11. Scaling sketch</a><a href="#sharding-strategies" style="padding-left: 24px">Sharding strategies</a><a href="#12-capacity-estimation-back-of-envelope" style="padding-left: 12px">12. Capacity estimation (back-of-envelope)</a><a href="#13-deployment-free-tier" style="padding-left: 12px">13. Deployment (free tier)</a><a href="#131-local-deployment" style="padding-left: 24px">13.1 Local deployment</a><a href="#132-free-tier-cloud-deployment" style="padding-left: 24px">13.2 Free-tier cloud deployment</a><a href="#14-observability" style="padding-left: 12px">14. Observability</a><a href="#15-failure-modes" style="padding-left: 12px">15. Failure modes</a><a href="#16-concepts-checklist-interview-map" style="padding-left: 12px">16. Concepts checklist (interview map)</a><a href="#17-suggested-experiments" style="padding-left: 12px">17. Suggested experiments</a>
+    </nav>
+    <main class="doc">
+      <header class="hero">
+        <h1>URL Shortener — System Design</h1>
+        <p class="subtitle">Architecture, tradeoffs, and diagrams for the Spring Boot implementation.</p>
+        <p class="meta">
+          <span class="badge">Spring Boot 3</span>
+          <span class="badge">Java 17</span>
+          Generated 2026-11-13 · Source: <code>docs/SYSTEM_DESIGN.md</code>
+        </p>
+      </header>
+      <article class="doc-content">
+        <h1 id="url-shortener-system-design">URL Shortener — System Design</h1>
+<p>This document explains the architecture implemented in this Spring Boot codebase and the classic system-design tradeoffs behind a production URL shortener (TinyURL / bit.ly style).</p>
+<h3 id="diagram-index">Diagram index</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Diagram</th>
+<th>Section</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>System context (C4-style)</td>
+<td><a href="#21-system-context">§2.1</a></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Runtime / logical architecture</td>
+<td><a href="#22-runtime-architecture">§2.2</a></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Layered architecture (this repo)</td>
+<td><a href="#23-layered-architecture-spring-boot">§2.3</a></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Component / package map</td>
+<td><a href="#24-component-diagram">§2.4</a></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Create-link flow</td>
+<td><a href="#25-create-link-sequence">§2.5</a></td>
+</tr>
+<tr>
+<td>6</td>
+<td>Redirect + analytics flow</td>
+<td><a href="#26-redirect-sequence">§2.6</a></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Data model (ER)</td>
+<td><a href="#5-data-model">§5</a></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Cache-aside</td>
+<td><a href="#6-caching-cache-aside">§6</a></td>
+</tr>
+<tr>
+<td>9</td>
+<td>Production scale-out</td>
+<td><a href="#11-scaling-sketch">§11</a></td>
+</tr>
+<tr>
+<td>10</td>
+<td>Local dev deployment</td>
+<td><a href="#131-local-deployment">§13.1</a></td>
+</tr>
+<tr>
+<td>11</td>
+<td>Free-tier cloud deployment</td>
+<td><a href="#132-free-tier-cloud-deployment">§13.2</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="1-problem-statement">1. Problem statement</h2>
+<p>Given a long URL, return a short, shareable link. When a client opens the short link, redirect to the original URL quickly and reliably. Optionally track clicks and support expiration and custom aliases.</p>
+<h3 id="non-functional-requirements-nfrs">Non-functional requirements (NFRs)</h3>
+<table>
+<thead>
+<tr>
+<th>NFR</th>
+<th>Target in this repo</th>
+<th>Production scale-up</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Redirect latency</td>
+<td>&lt; 50 ms warm path (in-memory cache)</td>
+<td>CDN edge + Redis cluster</td>
+</tr>
+<tr>
+<td>Availability</td>
+<td>Single instance + DB</td>
+<td>Multi-AZ, no single point of failure</td>
+</tr>
+<tr>
+<td>Durability</td>
+<td>ACID writes in SQL</td>
+<td>Same; replicas + backups</td>
+</tr>
+<tr>
+<td>Read/write ratio</td>
+<td>~100:1 reads</td>
+<td>Sharded read replicas, cache</td>
+</tr>
+<tr>
+<td>Abuse control</td>
+<td>Per-IP token bucket</td>
+<td>WAF + distributed rate limits</td>
+</tr>
+</tbody>
+</table>
+<h2 id="2-high-level-architecture">2. High-level architecture</h2>
+<div class="mermaid-wrap"><pre class="mermaid">
+flowchart LR
+  Client([Client])
+  LB[Load balancer]
+  API[Spring Boot app]
+  Cache[(Caffeine cache)]
+  DB[(PostgreSQL / H2)]
+  Client --> LB --> API
+  API --> Cache
+  API --> DB
+  API -. async .-> DB
+</pre></div>
+<h3 id="21-system-context">2.1 System context</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+C4Context
+  title System context — URL Shortener
+  Person(user, "User", "Creates and shares short links")
+  System(shortener, "URL Shortener", "Spring Boot service in this repo")
+  System_Ext(web, "Target websites", "Long URLs users link to")
+  Rel(user, shortener, "REST API + redirects", "HTTPS")
+  Rel(shortener, web, "HTTP 302 redirect", "HTTPS")
+</pre></div>
+<h3 id="22-runtime-architecture">2.2 Runtime architecture</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+flowchart TB
+  subgraph clients [Clients]
+    B[Browser]
+    C[CLI / curl]
+  end
+  subgraph spring [Spring Boot process]
+    F[RateLimitFilter]
+    RC[RedirectController]
+    AC[ShortLinkApiController]
+    SVC[ShortLinkService]
+    AN[AnalyticsService]
+    F --> RC & AC
+    RC & AC --> SVC
+    SVC --> AN
+  end
+  subgraph storage [Storage]
+    CAF[(Caffeine)]
+    SQL[(H2 / PostgreSQL)]
+  end
+  B & C --> F
+  SVC --> CAF
+  SVC --> SQL
+  AN -.-> SQL
+</pre></div>
+<h3 id="23-layered-architecture-spring-boot">2.3 Layered architecture (Spring Boot)</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+flowchart TB
+  subgraph presentation [Presentation — web]
+    API[ShortLinkApiController]
+    RED[RedirectController]
+    ADV[GlobalExceptionHandler]
+  end
+  subgraph application [Application — service]
+    LS[ShortLinkService]
+    AS[AnalyticsService]
+  end
+  subgraph persistence [Persistence]
+    REPO[Spring Data repositories]
+    ENT[JPA entities]
+  end
+  subgraph cross [Cross-cutting — config]
+    RL[RateLimitFilter]
+    CACHE[Caffeine CacheManager]
+  end
+  API & RED --> LS
+  LS --> AS
+  LS --> REPO
+  REPO --> ENT
+  RL -.-> API & RED
+  CACHE -.-> LS
+</pre></div>
+<h3 id="24-component-diagram">2.4 Component diagram</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+flowchart LR
+  subgraph util [util]
+    B62[Base62]
+    NORM[UrlNormalizer]
+  end
+  subgraph service [service]
+    SLS[ShortLinkService]
+    ANS[AnalyticsService]
+  end
+  subgraph data [repository / domain]
+    SLR[ShortLinkRepository]
+    CER[ClickEventRepository]
+    SL[ShortLink]
+    CE[ClickEvent]
+  end
+  SLS --> B62 & NORM & SLR
+  SLS --> ANS
+  ANS --> CER
+  SLR --> SL
+  CER --> CE
+</pre></div>
+<h3 id="25-create-link-sequence">2.5 Create-link sequence</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor User
+  participant API as ShortLinkApiController
+  participant Svc as ShortLinkService
+  participant DB as Database
+  User->>API: POST /api/v1/links
+  API->>Svc: create(request)
+  alt dedup hit
+    Svc->>DB: SELECT by long_url_hash
+    DB-->>Svc: existing row
+  else new link
+    Svc->>DB: INSERT short_links
+    Svc->>Svc: short_code = Base62(id)
+    Svc->>DB: UPDATE short_code
+  end
+  Svc-->>API: ShortLinkResponse
+  API-->>User: 201 Created + shortUrl
+</pre></div>
+<h3 id="26-redirect-sequence">2.6 Redirect sequence</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor User
+  participant Red as RedirectController
+  participant Svc as ShortLinkService
+  participant Cache as Caffeine
+  participant DB as Database
+  participant An as AnalyticsService
+  User->>Red: GET /{code}
+  Red->>Svc: resolveLongUrl(code)
+  Svc->>Cache: get(code)
+  alt miss
+    Svc->>DB: SELECT by short_code
+    DB-->>Svc: long_url
+    Svc->>Cache: put(code)
+  end
+  Svc-->>Red: longUrl
+  Red->>Svc: recordRedirect(...)
+  Svc->>DB: UPDATE click_count
+  Svc->>An: recordClickAsync (async)
+  Red-->>User: 302 Location: longUrl
+</pre></div>
+<p><strong>Write path (create link):</strong> <code>POST /api/v1/links</code> → validate URL → optional dedup by hash → insert row → assign <code>short_code</code> (Base62 of <code>id</code> or custom alias).</p>
+<p><strong>Read path (redirect):</strong> <code>GET /{code}</code> → cache-aside lookup → <code>302 Found</code> + <code>Location</code> → async click analytics.</p>
+<p>Code map:</p>
+<ul>
+<li><code>ShortLinkApiController</code> — REST API</li>
+<li><code>RedirectController</code> — hot redirect path</li>
+<li><code>ShortLinkService</code> — domain orchestration</li>
+<li><code>Base62</code> — ID → short string</li>
+<li><code>RateLimitFilter</code> — token bucket (Bucket4j)</li>
+<li><code>AnalyticsService</code> — async <code>click_events</code> inserts</li>
+</ul>
+<h2 id="3-core-api-design">3. Core API design</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/v1/links</code></td>
+<td>Create short link</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/links/{code}</code></td>
+<td>Metadata</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/v1/links/{code}/stats</code></td>
+<td>Clicks + event count</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/{code}</code></td>
+<td>Redirect (302)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/swagger-ui.html</code></td>
+<td>OpenAPI UI</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/actuator/health</code></td>
+<td>Health check (deploy)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="create-request">Create request</h3>
+<pre><code class="language-json">{
+  &quot;longUrl&quot;: &quot;https://example.com/very/long/path&quot;,
+  &quot;customAlias&quot;: &quot;launch&quot;,
+  &quot;ttlDays&quot;: 30
+}
+</code></pre>
+<h3 id="why-302-instead-of-301">Why 302 instead of 301?</h3>
+<ul>
+<li><strong>301</strong> is aggressively cached by browsers → hard to change destination or count clicks accurately.</li>
+<li><strong>302</strong> (used here) allows updated targets and analytics on each visit (unless intermediaries cache).</li>
+</ul>
+<h2 id="4-short-code-generation">4. Short code generation</h2>
+<h3 id="approach-a-implemented-database-sequence-base62">Approach A (implemented): Database sequence + Base62</h3>
+<ol>
+<li>Insert row (temporary code).</li>
+<li>Use auto-generated <code>id</code>.</li>
+<li>Set <code>short_code = Base62(id)</code>.</li>
+</ol>
+<p><strong>Pros:</strong> No collisions, O(1), monotonic, simple sharding key (<code>id</code>).</p>
+<p><strong>Cons:</strong> Codes leak insert order (sometimes undesirable); DB must allocate IDs.</p>
+<p>See <code>Base62.java</code> and <code>ShortLinkService.create()</code>.</p>
+<h3 id="approach-b-alternative-random-hash">Approach B (alternative): Random / hash</h3>
+<p>Hash URL + salt → truncate → retry on collision. Used when you want opaque, non-sequential codes without a central ID allocator.</p>
+<h3 id="approach-c-custom-alias">Approach C: Custom alias</h3>
+<p>User-provided vanity path; uniqueness enforced with DB unique index → <code>409 Conflict</code> (<code>AliasConflictException</code>).</p>
+<h2 id="5-data-model">5. Data model</h2>
+<div class="mermaid-wrap"><pre class="mermaid">
+erDiagram
+  short_links {
+    bigint id PK
+    varchar short_code UK
+    varchar long_url
+    varchar long_url_hash
+    bigint click_count
+    timestamptz expires_at
+    timestamptz created_at
+  }
+  click_events {
+    bigint id PK
+    varchar short_code
+    varchar user_agent
+    varchar referrer
+    varchar client_ip
+    timestamptz clicked_at
+  }
+  short_links ||--o{ click_events : tracks
+</pre></div>
+<ul>
+<li><strong><code>long_url_hash</code>:</strong> SHA-256 of normalized URL for deduplication (<code>app.deduplicate-long-urls</code>).</li>
+<li><strong><code>click_count</code>:</strong> denormalized counter (fast stats); <code>click_events</code> for raw audit trail.</li>
+<li><strong>Indexes:</strong> unique on <code>short_code</code>; index on <code>long_url_hash</code> for dedup lookups.</li>
+</ul>
+<p>Schema: <code>src/main/resources/db/migration/V1__schema.sql</code> (Flyway).</p>
+<h2 id="6-caching-cache-aside">6. Caching (cache-aside)</h2>
+<div class="mermaid-wrap"><pre class="mermaid">
+sequenceDiagram
+  participant R as RedirectController
+  participant S as ShortLinkService
+  participant C as Caffeine
+  participant D as Database
+  R->>S: resolveLongUrl(code)
+  alt cache hit
+    S->>C: get
+    C-->>S: longUrl
+  else cache miss
+    S->>D: SELECT by short_code
+    D-->>S: row
+    S->>C: put
+  end
+  S-->>R: longUrl
+</pre></div>
+<ul>
+<li><strong>TTL:</strong> <code>app.cache.redirect-ttl-seconds</code> (default 300s).</li>
+<li><strong>Eviction:</strong> Caffeine size cap <code>app.cache.maximum-size</code>.</li>
+<li><strong>Production:</strong> replace with <strong>Redis</strong> (shared across instances); same cache-aside pattern.</li>
+</ul>
+<p><strong>Consistency note:</strong> Stale cache may serve an old URL for up to TTL after a rare update (this service does not support URL edits; if added, use cache invalidation on write).</p>
+<h2 id="7-analytics-and-async-processing">7. Analytics and async processing</h2>
+<p>Redirects must stay fast. Click recording:</p>
+<ol>
+<li>Synchronous: <code>UPDATE click_count</code> (single row, cheap).</li>
+<li>Asynchronous: insert into <code>click_events</code> via <code>@Async</code> executor (<code>clickEventExecutor</code>).</li>
+</ol>
+<p>This is a minimal <strong>eventual consistency</strong> split: counter and event log may briefly diverge under failure; production would use a message queue (Kafka/SQS) for durable analytics.</p>
+<h2 id="8-rate-limiting">8. Rate limiting</h2>
+<p><code>RateLimitFilter</code> implements a <strong>token bucket</strong> per client IP (Bucket4j).</p>
+<ul>
+<li><strong>Single instance:</strong> in-memory <code>ConcurrentHashMap</code> of buckets.</li>
+<li><strong>Multiple instances:</strong> buckets must live in Redis (same algorithm, shared state) or at the edge (Cloudflare, API Gateway).</li>
+</ul>
+<p>Returns <code>429</code> with <code>{"error":"rate_limit_exceeded"}</code>.</p>
+<h2 id="9-url-normalization-amp-security">9. URL normalization &amp; security</h2>
+<p><code>UrlNormalizer</code>:</p>
+<ul>
+<li>Trims input, prepends <code>https://</code> when scheme missing.</li>
+<li>Parses with <code>URI</code> to ensure a host exists.</li>
+</ul>
+<p><strong>Production hardening (not all implemented):</strong></p>
+<ul>
+<li>Block private IPs (<code>127.0.0.1</code>, <code>10.x</code>, metadata endpoints) to prevent SSRF on redirect.</li>
+<li>Malware/phishing scanning async on create.</li>
+<li>Signed admin APIs for takedowns.</li>
+</ul>
+<h2 id="10-cap-theorem-amp-database-choice">10. CAP theorem &amp; database choice</h2>
+<ul>
+<li><strong>Creates</strong> need <strong>consistency</strong> (unique <code>short_code</code>, durable mapping).</li>
+<li><strong>Redirects</strong> favor <strong>availability</strong> + latency; tolerate cache staleness.</li>
+</ul>
+<p><strong>SQL (PostgreSQL)</strong> provides strong consistency for writes and indexed point reads. At scale:</p>
+<ul>
+<li><strong>Primary</strong> for writes.</li>
+<li><strong>Read replicas</strong> for redirect lookups (accept replication lag) or cache-first reads.</li>
+</ul>
+<p><strong>H2 file mode</strong> (<code>local</code> profile) = zero-cost local/dev; switch <code>postgres</code> profile for Neon/Supabase/Railway free Postgres.</p>
+<h2 id="11-scaling-sketch">11. Scaling sketch</h2>
+<div class="mermaid-wrap"><pre class="mermaid">
+flowchart TB
+  subgraph edge [Edge]
+    CDN[CDN / static]
+    WAF[WAF rate limit]
+  end
+  subgraph app [App tier]
+    A1[App instance]
+    A2[App instance]
+    A3[App instance]
+  end
+  subgraph data [Data tier]
+    R[(Redis)]
+    P[(PG primary)]
+    RR[(PG replicas)]
+  end
+  Users --> CDN --> WAF --> A1 & A2 & A3
+  A1 & A2 & A3 --> R
+  A1 & A2 & A3 --> P
+  A1 & A2 & A3 --> RR
+</pre></div>
+<table>
+<thead>
+<tr>
+<th>Bottleneck</th>
+<th>Symptom</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Redirect QPS</td>
+<td>High CPU on DB</td>
+<td>Redis + local cache, read replicas</td>
+</tr>
+<tr>
+<td>Hot short link</td>
+<td>Single key fan-out</td>
+<td>CDN cache redirect (careful with 302)</td>
+</tr>
+<tr>
+<td>Write QPS</td>
+<td>Primary DB load</td>
+<td>Shard by <code>id</code> range / hash of <code>short_code</code></td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>Billions of rows</td>
+<td>Tiered storage, TTL, archive <code>click_events</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="sharding-strategies">Sharding strategies</h3>
+<ul>
+<li><strong>By <code>short_code</code> hash:</strong> <code>shard = hash(code) % N</code>.</li>
+<li><strong>By <code>id</code> range:</strong> sequential IDs map cleanly to Base62.</li>
+</ul>
+<h2 id="12-capacity-estimation-back-of-envelope">12. Capacity estimation (back-of-envelope)</h2>
+<p>Assume:</p>
+<ul>
+<li>100M links created / month</li>
+<li>10B redirects / month (~3.8k RPS average, higher peak)</li>
+</ul>
+<p><strong>Storage (links only):</strong> ~500 bytes/row → 50 GB/month for new links (before indexes).</p>
+<p><strong>Redirect bandwidth:</strong> dominated by HTTP headers, not body — cache and edge termination matter more than app servers.</p>
+<h2 id="13-deployment-free-tier">13. Deployment (free tier)</h2>
+<p>This repo ships:</p>
+<ul>
+<li><code>Dockerfile</code> — container image (Render, Railway, Fly.io).</li>
+<li><code>docker-compose.yml</code> — local Postgres.</li>
+<li><code>render.yaml</code> — example Render blueprint.</li>
+</ul>
+<p>Typical env:</p>
+<pre><code class="language-bash">SPRING_PROFILES_ACTIVE=postgres
+DATABASE_URL=jdbc:postgresql://host/db?sslmode=require
+DATABASE_USERNAME=...
+DATABASE_PASSWORD=...
+APP_BASE_URL=https://your-service.onrender.com
+PORT=8080
+</code></pre>
+<p><strong>Free-tier stack example:</strong> Render web service (free) + Neon Postgres (free) + no Redis (Caffeine only on one instance).</p>
+<h3 id="131-local-deployment">13.1 Local deployment</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+flowchart LR
+  DEV[Developer machine]
+  JVM[Spring Boot :8080]
+  H2[(H2 file .data/)]
+  DEV --> JVM --> H2
+</pre></div>
+<h3 id="132-free-tier-cloud-deployment">13.2 Free-tier cloud deployment</h3>
+<div class="mermaid-wrap"><pre class="mermaid">
+flowchart TB
+  U[Users] --> R[Render / Railway web tier]
+  R --> APP[Docker container<br/>url-shortener.jar]
+  APP --> NEON[(Neon / Supabase Postgres)]
+  APP --> CAF[Caffeine in-process cache]
+</pre></div>
+<h2 id="14-observability">14. Observability</h2>
+<p>Spring Boot Actuator:</p>
+<ul>
+<li><code>/actuator/health</code> — liveness/readiness</li>
+<li><code>/actuator/metrics</code> — JVM, HTTP, cache stats</li>
+<li><code>/actuator/caches</code> — Caffeine hit rate</li>
+</ul>
+<p><strong>Production adds:</strong> RED metrics (Rate, Errors, Duration), structured logs with <code>short_code</code>, tracing (OpenTelemetry).</p>
+<h2 id="15-failure-modes">15. Failure modes</h2>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Behavior</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DB down</td>
+<td>Creates fail; redirects miss cache then fail</td>
+<td>HA Postgres, circuit breaker</td>
+</tr>
+<tr>
+<td>Cache poison N/A</td>
+<td>—</td>
+<td>TTL bounds staleness</td>
+</tr>
+<tr>
+<td>Async analytics lag</td>
+<td>Stats undercount briefly</td>
+<td>Queue + retry</td>
+</tr>
+<tr>
+<td>Clock skew</td>
+<td>Expiry edge cases</td>
+<td>UTC everywhere (<code>hibernate.jdbc.time_zone</code>)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="16-concepts-checklist-interview-map">16. Concepts checklist (interview map)</h2>
+<ul>
+<li>[x] REST API design &amp; idempotency (dedup by URL hash)</li>
+<li>[x] Horizontal scaling readiness</li>
+<li>[x] Cache-aside, TTL, eviction</li>
+<li>[x] SQL schema, indexes, unique constraints</li>
+<li>[x] Base62 / ID generation tradeoffs</li>
+<li>[x] 301 vs 302 redirects</li>
+<li>[x] Rate limiting (token bucket)</li>
+<li>[x] Async decoupling (analytics)</li>
+<li>[x] Flyway migrations</li>
+<li>[x] Health checks for PaaS</li>
+<li>[x] CAP / read-write splitting (documented)</li>
+<li>[ ] CDN, Redis cluster, Kafka (documented as scale path)</li>
+</ul>
+<h2 id="17-suggested-experiments">17. Suggested experiments</h2>
+<ol>
+<li>Load-test redirects with <code>hey</code> or <code>k6</code>; watch cache hit ratio via Actuator.</li>
+<li>Disable cache TTL to 0 mentally — compare DB QPS.</li>
+<li>Deploy two instances without Redis; observe divergent rate limits (why shared state matters).</li>
+<li>Add Redis cache provider implementing the same <code>resolveLongUrl</code> pattern.</li>
+<li>Change redirect to <code>301</code> and observe browser behavior vs stats.</li>
+</ol>
+<hr />
+<p><em>Implementation package:</em> <code>com.example.urlshortener</code> under <code>url-shortener/</code>.</p>
+      </article>
+    </main>
+  </div>
+  <div class="toolbar no-print">
+    <button type="button" class="secondary" onclick="window.print()">Save as PDF</button>
+    <button type="button" onclick="location.reload()">Refresh diagrams</button>
+  </div>
+</body>
+</html>
